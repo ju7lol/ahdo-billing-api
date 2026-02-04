@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify,redirect
 import stripe
 import os
 import json
@@ -149,6 +149,37 @@ def membership_status():
         status=status,
         current_period_end=period_end
     )
+
+# ---------- CHECKOUT ----------
+
+
+@app.route("/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    if not require_internal_key(request):
+        return jsonify(error="unauthorized"), 401
+
+    body = request.get_json(silent=True) or {}
+    username = (body.get("username") or "").strip()
+    if not username:
+        return jsonify(error="missing username"), 400
+
+    PRICE_ID = os.getenv("STRIPE_PRICE_AHDO_PLUS")
+    BASE_SUCCESS = os.getenv("SUCCESS_REDIRECT_URL", "http://localhost:5000/ahdo-plus/success-local")
+    BASE_CANCEL = os.getenv("CANCEL_REDIRECT_URL", "http://localhost:5000/ahdo-plus")
+
+    if not PRICE_ID:
+        return jsonify(error="missing STRIPE_PRICE_AHDO_PLUS"), 500
+
+    cs = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": PRICE_ID, "quantity": 1}],
+        success_url=f"{BASE_SUCCESS}?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=BASE_CANCEL,
+        metadata={"username": username, "plan": "ahdo+"},
+        subscription_data={"metadata": {"username": username, "plan": "ahdo+"}}
+    )
+
+    return jsonify(url=cs["url"])
 
 
 @app.route("/")
