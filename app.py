@@ -15,6 +15,13 @@ DATA_FILE = "memberships.json"
 
 stripe.api_key = STRIPE_SECRET_KEY
 
+if not STRIPE_SECRET_KEY:
+    print("❌ Missing STRIPE_SECRET_KEY")
+if not STRIPE_WEBHOOK_SECRET:
+    print("❌ Missing STRIPE_WEBHOOK_SECRET")
+if not INTERNAL_API_KEY:
+    print("❌ Missing INTERNAL_API_KEY")
+
 
 # ---------- HELPERS ----------
 def load_data():
@@ -147,3 +154,7 @@ def membership_status():
 @app.route("/")
 def health():
     return "Billing service running"
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
