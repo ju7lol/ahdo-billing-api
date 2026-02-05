@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify,redirect
+from flask import Flask, request, jsonify
 import stripe
 import os
 import json
@@ -27,9 +27,11 @@ if not INTERNAL_API_KEY:
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -42,6 +44,8 @@ def now():
 
 def require_internal_key(req):
     auth = req.headers.get("Authorization", "")
+    if not INTERNAL_API_KEY:
+        raise RuntimeError("Missing INTERNAL_API_KEY")
     return auth == f"Bearer {INTERNAL_API_KEY}"
 
 
@@ -64,21 +68,27 @@ def stripe_webhook():
 
     data = load_data()
 
-    def upsert(username, payload):
-        data[username.lower()] = payload
+    def upsert(user_id, payload):
+        data[str(user_id)] = payload
         save_data(data)
+
 
     # --- CHECKOUT COMPLETED ---
     if etype == "checkout.session.completed":
         meta = obj.get("metadata", {})
-        username = meta.get("username")
-        if not username:
+        user_id = meta.get("user_id")
+        if not user_id:
             return jsonify(ok=True)
 
         sub_id = obj.get("subscription")
         sub = stripe.Subscription.retrieve(sub_id)
 
-        upsert(username, {
+        customer_id = obj.get("customer")
+        if customer_id:
+            stripe.Customer.modify(customer_id, metadata={"user_id": str(user_id)})
+
+
+        upsert(user_id, {
             "status": sub["status"],
             "subscription_id": sub_id,
             "customer_id": obj.get("customer"),
@@ -86,14 +96,20 @@ def stripe_webhook():
             "updated_at": now()
         })
 
+
     # --- SUBSCRIPTION UPDATED ---
     elif etype == "customer.subscription.updated":
-        meta = obj.get("metadata", {})
-        username = meta.get("username")
-        if not username:
+        user_id = (obj.get("metadata") or {}).get("user_id")
+        if not user_id:
+            customer_id = obj.get("customer")
+            if customer_id:
+                cust = stripe.Customer.retrieve(customer_id)
+                user_id = (cust.get("metadata") or {}).get("user_id")
+        if not user_id:
             return jsonify(ok=True)
 
-        upsert(username, {
+
+        upsert(user_id, {
             "status": obj["status"],
             "subscription_id": obj["id"],
             "customer_id": obj["customer"],
@@ -101,14 +117,19 @@ def stripe_webhook():
             "updated_at": now()
         })
 
+
     # --- SUBSCRIPTION DELETED ---
     elif etype == "customer.subscription.deleted":
-        meta = obj.get("metadata", {})
-        username = meta.get("username")
-        if not username:
+        user_id = (obj.get("metadata") or {}).get("user_id")
+        if not user_id:
+            customer_id = obj.get("customer")
+            if customer_id:
+                cust = stripe.Customer.retrieve(customer_id)
+                user_id = (cust.get("metadata") or {}).get("user_id")
+        if not user_id:
             return jsonify(ok=True)
 
-        upsert(username, {
+        upsert(user_id, {
             "status": "canceled",
             "subscription_id": obj["id"],
             "customer_id": obj["customer"],
@@ -116,7 +137,7 @@ def stripe_webhook():
             "updated_at": now()
         })
 
-    return jsonify(ok=True)
+
 
 
 # ---------- CONSULTA DE MEMBRESÍA ----------
@@ -125,12 +146,13 @@ def membership_status():
     if not require_internal_key(request):
         return jsonify(error="unauthorized"), 401
 
-    username = request.args.get("username", "").lower().strip()
-    if not username:
-        return jsonify(error="missing username"), 400
+    user_id = (request.args.get("user_id") or "").strip()
+    if not user_id:
+        return jsonify(error="missing user_id"), 400
 
     data = load_data()
-    m = data.get(username)
+    m = data.get(str(user_id))
+
 
     if not m:
         return jsonify(active=False, reason="not_found")
@@ -159,10 +181,11 @@ def create_checkout_session():
         return jsonify(error="unauthorized"), 401
 
     body = request.get_json(silent=True) or {}
-    username = (body.get("username") or "").strip()
-    if not username:
-        return jsonify(error="missing username"), 400
+    user_id = (body.get("user_id") or "").strip()
+    if not user_id:
+        return jsonify(error="missing user_id"), 400
 
+    plan_key = (body.get("plan_key") or "ahdo_plus").strip()
     PRICE_ID = os.getenv("STRIPE_PRICE_AHDO_PLUS")
     BASE_SUCCESS = os.getenv("SUCCESS_REDIRECT_URL", "http://localhost:5000/ahdo-plus/success-local")
     BASE_CANCEL = os.getenv("CANCEL_REDIRECT_URL", "http://localhost:5000/ahdo-plus")
@@ -175,8 +198,8 @@ def create_checkout_session():
         line_items=[{"price": PRICE_ID, "quantity": 1}],
         success_url=f"{BASE_SUCCESS}?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=BASE_CANCEL,
-        metadata={"username": username, "plan": "ahdo+"},
-        subscription_data={"metadata": {"username": username, "plan": "ahdo+"}}
+        metadata={"user_id": user_id, "plan_key": plan_key},
+        subscription_data={"metadata": {"user_id": user_id, "plan_key": plan_key}}
     )
 
     return jsonify(url=cs["url"])
